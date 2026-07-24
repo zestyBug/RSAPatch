@@ -1,7 +1,6 @@
 
 EXPORTS
 	GetFileVersionInfoA
-	GetFileVersionInfoByHandle
 	GetFileVersionInfoExA
 	GetFileVersionInfoExW
 	GetFileVersionInfoSizeA

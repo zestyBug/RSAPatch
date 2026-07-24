@@ -2,7 +2,27 @@
 #include "Utils.h"
 #include <filesystem>
 
+FARPROC OriginalFuncs_version[16];
 FARPROC OriginalFuncs_version[17];
+
+inline constexpr const char* ExportNames_version[] = {
+		"GetFileVersionInfoA",
+		"GetFileVersionInfoExA",
+		"GetFileVersionInfoExW",
+		"GetFileVersionInfoSizeA",
+		"GetFileVersionInfoSizeExA",
+		"GetFileVersionInfoSizeExW",
+		"GetFileVersionInfoSizeW",
+		"GetFileVersionInfoW",
+		"VerFindFileA",
+		"VerFindFileW",
+		"VerInstallFileA",
+		"VerInstallFileW",
+		"VerLanguageNameA",
+		"VerLanguageNameW",
+		"VerQueryValueA",
+		"VerQueryValueW"
+};
 
 void Exports::Load()
 {
@@ -21,15 +41,15 @@ void Exports::Load()
 	}
 
 	// get addresses of original functions
-	for (int i = 0; i < 17; i++)
+	for (int i = 0; i < 16; i++)
 	{
-		OriginalFuncs_version[i] = GetProcAddress(version, ExportNames_version[i].c_str());
+		OriginalFuncs_version[i] = GetProcAddress(version, ExportNames_version[i]);
 		if (!OriginalFuncs_version[i])
 		{
-			Utils::ConsolePrint("Failed to get address of %s\n", ExportNames_version[i].c_str());
+			Utils::ConsolePrint("Failed to get address of %s\n", ExportNames_version[i]);
 			return;
 		}
 	}
 	
-	Utils::ConsolePrint("Loaded version.dll from system32\n");
+	Utils::ConsolePrint("Loaded %s\n", OriginalPath.c_str());
 }
