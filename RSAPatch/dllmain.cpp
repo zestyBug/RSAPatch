@@ -337,6 +337,7 @@ void OldVersion(HMODULE ModuleHandle) // <= 3.5.0
 
 	Utils::ConsolePrint("Hooked GetPublicKey - Original at: %p\n", oGetPublicKey);
 	Utils::ConsolePrint("Hooked GetPrivateKey - Original at: %p\n", oGetPrivateKey);
+	return;
 err:
 	oReadToEnd = nullptr;
 	Utils::ConsolePrint("%s: %s (%d)\n",func,MH_StatusToString(status),status);
@@ -366,6 +367,7 @@ void NewVersion(HMODULE ModuleHandle)
 	}
 
 	Utils::ConsolePrint("Hooked ReadToEnd - Original at: %p\n", oReadToEnd);
+	return;
 err:
 	oReadToEnd = nullptr;
 	Utils::ConsolePrint("%s: %s (%d)\n",func,MH_StatusToString(status),status);
