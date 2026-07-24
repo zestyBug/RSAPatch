@@ -3,7 +3,7 @@
 #include <filesystem>
 
 FARPROC OriginalFuncs_version[16];
-FARPROC OriginalFuncs_version[17];
+LdrLoadDll_t oLdrLoadDll = nullptr;
 
 inline constexpr const char* ExportNames_version[] = {
 		"GetFileVersionInfoA",
@@ -52,4 +52,17 @@ void Exports::Load()
 	}
 	
 	Utils::ConsolePrint("Loaded %s\n", OriginalPath.c_str());
+
+	HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+	if (!ntdll) {
+		Utils::ConsolePrint("Failed to load ntdll.dll\n");
+		return;
+	}
+	oLdrLoadDll = (LdrLoadDll_t)GetProcAddress(ntdll, "LdrLoadDll");
+	if (!oLdrLoadDll) {
+		Utils::ConsolePrint("Failed to get address of LdrLoadDll\n");
+		return;
+	}
+
+	Utils::ConsolePrint("Loading ntdll.dll\n");
 }

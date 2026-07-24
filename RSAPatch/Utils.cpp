@@ -1,5 +1,6 @@
 #include "Utils.h"
 #include <stdio.h>
+#include <stdint.h>
 
 HANDLE _out = NULL, _old_out = NULL;
 HANDLE _err = NULL, _old_err = NULL;
@@ -54,7 +55,7 @@ bool Utils::ConsolePrint(const char* fmt, ...)
     return !!WriteConsoleA(_out, buf, static_cast<DWORD>(strlen(buf)), nullptr, nullptr);
 }
 
-uintptr_t Utils::PatternScan(LPCSTR module, LPCSTR pattern)
+uintptr_t Utils::PatternScan(HMODULE mod, LPCSTR pattern)
 {
     static auto pattern_to_byte = [](const char* pattern) {
 
@@ -78,15 +79,14 @@ uintptr_t Utils::PatternScan(LPCSTR module, LPCSTR pattern)
         return bytes;
     };
 
-    auto mod = GetModuleHandleA(module);
     if (!mod)
         return 0;
 	
     auto dosHeader = (PIMAGE_DOS_HEADER)mod;
-    auto ntHeaders = (PIMAGE_NT_HEADERS)((std::uint8_t*)mod + dosHeader->e_lfanew);
+    auto ntHeaders = (PIMAGE_NT_HEADERS)((uint8_t*)mod + dosHeader->e_lfanew);
     auto sizeOfImage = ntHeaders->OptionalHeader.SizeOfImage;
     auto patternBytes = pattern_to_byte(pattern);
-    auto scanBytes = reinterpret_cast<std::uint8_t*>(mod);
+    auto scanBytes = reinterpret_cast<uint8_t*>(mod);
     auto s = patternBytes.size();
     auto d = patternBytes.data();
 

@@ -1,23 +1,14 @@
 #include <Windows.h>
 #include <winternl.h>
 #include <intrin.h>
+#include <algorithm>
 #include <fstream>
 #include <filesystem>
 #include <string>
-#include "detours.h"
 #include "Utils.h"
 #include "exports.h"
+#include "../minhook/include/MinHook.h"
 
-#pragma comment(lib, "detours.lib")
-#pragma comment(lib, "ntdll.lib")
-
-typedef enum _SECTION_INFORMATION_CLASS {
-	SectionBasicInformation,
-	SectionImageInformation
-} SECTION_INFORMATION_CLASS, * PSECTION_INFORMATION_CLASS;
-EXTERN_C NTSTATUS __stdcall NtQuerySection(HANDLE SectionHandle, SECTION_INFORMATION_CLASS InformationClass, PVOID InformationBuffer, ULONG InformationBufferSize, PULONG ResultLength);
-EXTERN_C NTSTATUS __stdcall NtProtectVirtualMemory(HANDLE ProcessHandle, PVOID* BaseAddress, PULONG  NumberOfBytesToProtect, ULONG NewAccessProtection, PULONG OldAccessProtection);
-EXTERN_C NTSTATUS __stdcall NtPulseEvent(HANDLE EventHandle, PULONG PreviousState);
 
 template <typename T>
 class Array
@@ -61,26 +52,87 @@ public:
 };
 
 
+static BYTE* g_SyscallStub = NULL;
 PVOID oGetPublicKey = nullptr;
 PVOID oGetPrivateKey = nullptr;
 PVOID oReadToEnd = nullptr;
 LPCSTR gcpb = "<RSAKeyValue><Modulus>xbbx2m1feHyrQ7jP+8mtDF/pyYLrJWKWAdEv3wZrOtjOZzeLGPzsmkcgncgoRhX4dT+1itSMR9j9m0/OwsH2UoF6U32LxCOQWQD1AMgIZjAkJeJvFTrtn8fMQ1701CkbaLTVIjRMlTw8kNXvNA/A9UatoiDmi4TFG6mrxTKZpIcTInvPEpkK2A7Qsp1E4skFK8jmysy7uRhMaYHtPTsBvxP0zn3lhKB3W+HTqpneewXWHjCDfL7Nbby91jbz5EKPZXWLuhXIvR1Cu4tiruorwXJxmXaP1HQZonytECNU/UOzP6GNLdq0eFDE4b04Wjp396551G99YiFP2nqHVJ5OMQ==</Modulus><Exponent>AQAB</Exponent></RSAKeyValue>";
 
-PVOID Detour(PVOID func, PVOID jmp, bool attach)
-{
-	if (!func)
-		return nullptr;
+bool InitSyscallBypass() {
+    if (g_SyscallStub) return true;
+	DWORD g_SyscallNumber = 0;
 
-	PVOID call = func;
-	DetourTransactionBegin();
-	DetourUpdateThread((HANDLE)-2);
-	if (attach)
-		DetourAttach(&call, jmp);
-	else
-		DetourDetach(&call, jmp);
-	DetourTransactionCommit();
+    // Get syscall number
+    HMODULE hNtdll = GetModuleHandleA("ntdll.dll");
+    if (!hNtdll) return false;
+    
+    BYTE* pFunc = (BYTE*)GetProcAddress(hNtdll, "NtProtectVirtualMemory");
+    if (!pFunc) return false;
 
-	return call;
+    // Find syscall number
+    for (int i = 0; i < 64; i++)
+        if (pFunc[i] == 0xB8) {
+            g_SyscallNumber = *(DWORD*)(pFunc + i + 1);
+            break;
+        }
+
+    if (g_SyscallNumber == 0)
+        g_SyscallNumber = 0x0050;
+
+    // Build the syscall stub in memory
+    BYTE stub[] = {
+        0x4C, 0x8B, 0xD1,              // mov r10, rcx
+        0xB8, 0x00, 0x00, 0x00, 0x00,  // mov eax, XXXXXXXX
+        0x0F, 0x05,                    // syscall
+        0xC3                           // ret
+    };
+
+    // Put the syscall number in the stub
+    *(DWORD*)(stub + 4) = g_SyscallNumber;
+
+    SIZE_T g_StubSize = sizeof(stub);
+
+    // Allocate executable memory
+    g_SyscallStub = (BYTE*)VirtualAlloc(NULL, g_StubSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!g_SyscallStub) return false;
+
+    // Copy the stub
+    memcpy(g_SyscallStub, stub, g_StubSize);
+
+    return true;
+}
+
+// Function type for the syscall stub
+typedef NTSTATUS (NTAPI *SyscallFunc_t)(
+    HANDLE, PVOID*, SIZE_T*, ULONG, PULONG
+);
+
+// Bypass function that calls the real syscall
+extern "C" BOOL BypassVirtualProtect(
+    LPVOID lpAddress,
+    SIZE_T dwSize,
+    DWORD flNewProtect,
+    PDWORD lpflOldProtect
+) { 
+	if (!InitSyscallBypass())
+        return FALSE;
+    HANDLE hProcess = GetCurrentProcess();
+    PVOID BaseAddress = lpAddress;
+    SIZE_T RegionSize = dwSize;
+    ULONG NewProtect = flNewProtect;
+    ULONG OldProtect = 0;
+
+    // Call direct syscall
+	const SyscallFunc_t pFunc = (SyscallFunc_t)g_SyscallStub;
+    NTSTATUS status = pFunc(hProcess, &BaseAddress, &RegionSize, NewProtect, &OldProtect);
+    if (NT_SUCCESS(status)) {
+        if (lpflOldProtect) {
+            *lpflOldProtect = OldProtect;
+        }
+        return TRUE;
+    }
+	Utils::ConsolePrint("Error NtProtectVirtualMemory: %x\n", status);
+    return FALSE;
 }
 
 std::string ReadFile(std::string path)
@@ -102,7 +154,7 @@ Array<BYTE>* __fastcall hkGetRSAKey()
 	static PVOID privateKeyRet = nullptr;
 	static PVOID publicKeyRet = nullptr;
 
-	auto ret = _ReturnAddress();
+	auto ret = __builtin_return_address(0);
 
 	// it will always called for private key first then public key
 	if (!privateKeyRet)
@@ -202,18 +254,6 @@ String* __fastcall hkReadToEnd(void* rcx, void* rdx)
 	return result;
 }
 
-void DisableVMP()
-{
-	// restore hook at NtProtectVirtualMemory
-	auto ntdll = GetModuleHandleA("ntdll.dll");
-	bool linux = GetProcAddress(ntdll, "wine_get_version") != nullptr;
-	void* routine = linux ? (void*)NtPulseEvent : (void*)NtQuerySection;
-	DWORD old;
-	VirtualProtect(NtProtectVirtualMemory, 1, PAGE_EXECUTE_READWRITE, &old);
-	*(uintptr_t*)NtProtectVirtualMemory = *(uintptr_t*)routine & ~(0xFFui64 << 32) | (uintptr_t)(*(uint32_t*)((uintptr_t)routine + 4) - 1) << 32;
-	VirtualProtect(NtProtectVirtualMemory, 1, old, &old);
-}
-
 void DisableLogReport()
 {
 	char szProcessPath[MAX_PATH]{};
@@ -234,7 +274,7 @@ void DisableLogReport()
 
 uintptr_t FindEntry(uintptr_t addr)
 {
-	__try {
+	try {
 		while (true)
 		{
 			// walk back until we find function entry
@@ -247,15 +287,19 @@ uintptr_t FindEntry(uintptr_t addr)
 			addr--;
 		}
 	}
-	__except (1) {}
+	catch (...) {}
 
 	return 0;
 }
 
-void OldVersion() // <= 3.5.0 
+void OldVersion(HMODULE ModuleHandle) // <= 3.5.0 
 {
-	auto GetPublicKey = Utils::PatternScan("UserAssembly.dll", "48 BA 45 78 70 6F 6E 65 6E 74 48 89 90 ? ? ? ? 48 BA 3E 3C 2F 52 53 41 4B 65"); // 'Exponent></RSAKe'
-	auto GetPrivateKey = Utils::PatternScan("UserAssembly.dll", "2F 49 6E 76 65 72 73 65"); // '/Inverse'
+	Utils::ConsolePrint("Using old method (v <= 3.5.0)\n");
+
+	const char *func;
+	MH_STATUS status;
+	auto GetPublicKey = Utils::PatternScan(ModuleHandle, "48 BA 45 78 70 6F 6E 65 6E 74 48 89 90 ? ? ? ? 48 BA 3E 3C 2F 52 53 41 4B 65"); // 'Exponent></RSAKe'
+	auto GetPrivateKey = Utils::PatternScan(ModuleHandle, "2F 49 6E 76 65 72 73 65"); // '/Inverse'
 
 	GetPublicKey = FindEntry(GetPublicKey);
 	GetPrivateKey = FindEntry(GetPrivateKey);
@@ -269,11 +313,88 @@ void OldVersion() // <= 3.5.0
 	if (!GetPrivateKey || GetPrivateKey % 16 > 0)
 		Utils::ConsolePrint("Failed to find GetPrivateKey - Need to update\n");
 
-	oGetPublicKey = Detour((PVOID)GetPublicKey, hkGetRSAKey, true);
-	oGetPrivateKey = Detour((PVOID)GetPrivateKey, hkGetRSAKey, true);
+
+	status = MH_CreateHook((PVOID)GetPublicKey, (void*)hkGetRSAKey, &oGetPublicKey);
+	if (status != MH_OK) { func = "MH_CreateHook";goto err; }
+
+	status = MH_CreateHook((PVOID)GetPrivateKey, (void*)hkGetRSAKey, &oGetPrivateKey);
+	if (status != MH_OK) { func = "MH_CreateHook";goto err; }
+
+	status = MH_EnableHook((PVOID)GetPublicKey);
+	if (status != MH_OK) {
+		MH_RemoveHook((PVOID)GetPublicKey);
+		func = "MH_EnableHook";
+		goto err;
+	}
+
+	status = MH_EnableHook((PVOID)GetPrivateKey);
+	if (status != MH_OK) {
+		MH_RemoveHook((PVOID)GetPublicKey);
+		MH_RemoveHook((PVOID)GetPrivateKey);
+		func = "MH_EnableHook";
+		goto err;
+	}
 
 	Utils::ConsolePrint("Hooked GetPublicKey - Original at: %p\n", oGetPublicKey);
 	Utils::ConsolePrint("Hooked GetPrivateKey - Original at: %p\n", oGetPrivateKey);
+err:
+	oReadToEnd = nullptr;
+	Utils::ConsolePrint("%s: %s (%d)\n",func,MH_StatusToString(status),status);
+}
+void NewVersion(HMODULE ModuleHandle)
+{
+	const char *func;
+	MH_STATUS status;
+	Utils::ConsolePrint("Using new method (3.5.0 < v <= 4.0.0)\n");
+
+	auto ReadToEnd = Utils::PatternScan(ModuleHandle, "48 89 5C 24 ? 48 89 74 24 ? 48 89 7C 24 ? 41 56 48 83 EC 20 48 83 79 ? ? 48 8B D9 75 05");
+	if (!ReadToEnd){
+		Utils::ConsolePrint("Failed to find ReadToEnd - Need to update\n");
+		return;
+	}
+
+	status = MH_CreateHook((PVOID)ReadToEnd, (void*)hkReadToEnd, &oReadToEnd);
+	if (status != MH_OK) { func = "MH_CreateHook";goto err; }
+
+	Utils::ConsolePrint("Target=%p Hook=%p Original=%p\n",ReadToEnd,hkReadToEnd,oReadToEnd);
+
+	status = MH_EnableHook((PVOID)ReadToEnd);
+	if (status != MH_OK) {
+		MH_RemoveHook((PVOID)ReadToEnd);
+		func = "MH_EnableHook";
+		goto err;
+	}
+
+	Utils::ConsolePrint("Hooked ReadToEnd - Original at: %p\n", oReadToEnd);
+err:
+	oReadToEnd = nullptr;
+	Utils::ConsolePrint("%s: %s (%d)\n",func,MH_StatusToString(status),status);
+}
+
+NTSTATUS NTAPI hkLdrLoadDll(PWCHAR PathToFile, PULONG Flags, PUNICODE_STRING ModuleFileName, PHANDLE ModuleHandle)
+{
+    NTSTATUS result = oLdrLoadDll(PathToFile, Flags, ModuleFileName, ModuleHandle);
+
+	if (NT_SUCCESS(result) && ModuleFileName && ModuleFileName->Buffer)
+	{
+		const std::wstring name(ModuleFileName->Buffer, ModuleFileName->Length / sizeof(WCHAR));
+		if(name.find(L"UserAssembly.dll") != std::wstring::npos || name.find(L"userassembly.dll") != std::wstring::npos)
+		{
+			Utils::ConsolePrint("found UserAssembly\n");
+			auto UserAssembly = (HMODULE)*ModuleHandle;
+			PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)UserAssembly;
+			PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)(UserAssembly + dos->e_lfanew);
+			DWORD timestamp = nt->FileHeader.TimeDateStamp;
+
+			if (timestamp <= 0x63ECA960) {
+				OldVersion(UserAssembly);
+			} else {
+				NewVersion(UserAssembly);
+			}
+		}
+	}
+
+    return result;
 }
 
 void ACheckForThoseWhoCannotFollowInstructions(LPVOID instance)
@@ -332,62 +453,34 @@ void ACheckForThoseWhoCannotFollowInstructions(LPVOID instance)
 
 DWORD __stdcall Thread(LPVOID p)
 {
-	Utils::AttachConsole();
-	Utils::ConsolePrint("Waiting for game to startup\n");
-
+	HMODULE ntdll;
+	PVOID addr;
+	const char *func;
+    MH_STATUS status;
 	ACheckForThoseWhoCannotFollowInstructions(p);
 
-	auto pid = GetCurrentProcessId();
-	while (true)
-	{
-		// use EnumWindows to pinpoint the target window
-		// as there could be other window with the same class name
-		EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL __stdcall {
-
-			DWORD wndpid = 0;
-			GetWindowThreadProcessId(hwnd, &wndpid);
-
-			char szWindowClass[256]{};
-			GetClassNameA(hwnd, szWindowClass, 256);
-			if (!strcmp(szWindowClass, "UnityWndClass") && wndpid == *(DWORD*)lParam)
-			{
-				*(DWORD*)lParam = 0;
-				return FALSE;
-			}
-
-			return TRUE;
-
-		}, (LPARAM)&pid);
-
-		if (!pid)
-			break;
-
-		Sleep(2000);
+    ntdll = GetModuleHandleA("ntdll.dll");
+    addr = (PVOID)GetProcAddress(ntdll, "LdrLoadDll");
+    status = MH_Initialize();
+	if(status != MH_OK){
+		func = "MH_Initialize";
+		goto err;
 	}
-
-	DisableVMP(); 
-	
-	auto UserAssembly = (uintptr_t)GetModuleHandleA("UserAssembly.dll");
-	PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)UserAssembly;
-	PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)(UserAssembly + dos->e_lfanew);
-	DWORD timestamp = nt->FileHeader.TimeDateStamp;
-
-	if (timestamp <= 0x63ECA960)
-	{
-		OldVersion();
-		return 0;
+    status = MH_CreateHook(addr, (PVOID)hkLdrLoadDll, (void**)&oLdrLoadDll);
+	if(status != MH_OK){
+		func = "MH_CreateHook";
+		goto err;
 	}
-
-	auto ReadToEnd = Utils::PatternScan("UserAssembly.dll", "48 89 5C 24 ? 48 89 74 24 ? 48 89 7C 24 ? 41 56 48 83 EC 20 48 83 79 ? ? 48 8B D9 75 05");
-	Utils::ConsolePrint("ReadToEnd: %p\n", ReadToEnd);
-
-	if (!ReadToEnd || ReadToEnd % 16 > 0)
-		Utils::ConsolePrint("Failed to find ReadToEnd - Need to update\n");
-
-	oReadToEnd = Detour((PVOID)ReadToEnd, hkReadToEnd, true);
-	Utils::ConsolePrint("Hooked ReadToEnd - Original at: %p\n", oReadToEnd);
-
+    status = MH_EnableHook(addr);
+	if(status != MH_OK){
+		func = "MH_EnableHook";
+		goto err;
+	}
+	Utils::ConsolePrint("hooked LdrLoadDll\n");
 	return 0;
+err:;
+	Utils::ConsolePrint("%s: %s (%d)\n", func, MH_StatusToString(status),status);
+	return 1;
 }
 
 DWORD __stdcall DllMain(HINSTANCE hInstance, DWORD fdwReason, LPVOID lpReserved)
@@ -397,29 +490,26 @@ DWORD __stdcall DllMain(HINSTANCE hInstance, DWORD fdwReason, LPVOID lpReserved)
 
 	if (fdwReason == DLL_PROCESS_ATTACH)
 	{
-		if (HANDLE hThread = CreateThread(nullptr, 0, Thread, hInstance, 0, nullptr))
+		HANDLE hThread = CreateThread(nullptr, 0, Thread, hInstance, 0, nullptr);
+		if (!hThread)
+			Utils::ConsolePrint("CreateThread failed: %lu\n", GetLastError());
+		else
 			CloseHandle(hThread);
 	}
 
 	return TRUE;
 }
 
-bool TlsOnce = false;
 // this runs way before dllmain
 void __stdcall TlsCallback(PVOID hModule, DWORD fdwReason, PVOID pContext)
 {
-	if (!TlsOnce)
-	{
+	if (fdwReason != DLL_PROCESS_ATTACH) 
+	    return;
 		DisableLogReport();
 		// for version.dll proxy
 		// load exports as early as possible
-		// Utils::AttachConsole();
+		Utils::AttachConsole();
 		Exports::Load();
-		TlsOnce = true;
-	}
 }
 
-#pragma comment (linker, "/INCLUDE:_tls_used")
-#pragma comment (linker, "/INCLUDE:tls_callback_func")
-#pragma const_seg(".CRT$XLF")
-EXTERN_C const PIMAGE_TLS_CALLBACK tls_callback_func = TlsCallback;
+extern "C" PIMAGE_TLS_CALLBACK tls_callback_func __attribute__((section(".CRT$XLB"), used)) = TlsCallback;
