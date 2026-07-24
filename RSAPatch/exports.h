@@ -10,7 +10,8 @@ typedef NTSTATUS (NTAPI* LdrLoadDll_t)(
     PUNICODE_STRING ModuleFileName,
     PHANDLE ModuleHandle
 );
-extern "C" FARPROC OriginalFuncs_version[16];
+#define EXPORTED_FUNCTIONS_COUNT 16
+extern "C" FARPROC OriginalFuncs_version[EXPORTED_FUNCTIONS_COUNT];
 extern "C" LdrLoadDll_t oLdrLoadDll;
 
 namespace Exports

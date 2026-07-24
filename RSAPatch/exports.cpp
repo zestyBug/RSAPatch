@@ -2,10 +2,11 @@
 #include "Utils.h"
 #include <filesystem>
 
-FARPROC OriginalFuncs_version[16];
+FARPROC OriginalFuncs_version[EXPORTED_FUNCTIONS_COUNT];
 LdrLoadDll_t oLdrLoadDll = nullptr;
 
-inline constexpr const char* ExportNames_version[] = {
+// take a look at https://github.com/wine-mirror/wine/blob/master/include/winver.h
+inline constexpr const char* ExportNames_version[EXPORTED_FUNCTIONS_COUNT] = {
 		"GetFileVersionInfoA",
 		"GetFileVersionInfoExA",
 		"GetFileVersionInfoExW",
@@ -41,7 +42,7 @@ void Exports::Load()
 	}
 
 	// get addresses of original functions
-	for (int i = 0; i < 16; i++)
+	for (int i = 0; i < EXPORTED_FUNCTIONS_COUNT; i++)
 	{
 		OriginalFuncs_version[i] = GetProcAddress(version, ExportNames_version[i]);
 		if (!OriginalFuncs_version[i])
