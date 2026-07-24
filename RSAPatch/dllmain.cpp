@@ -383,7 +383,7 @@ NTSTATUS NTAPI hkLdrLoadDll(PWCHAR PathToFile, PULONG Flags, PUNICODE_STRING Mod
 			Utils::ConsolePrint("found UserAssembly\n");
 			auto UserAssembly = (HMODULE)*ModuleHandle;
 			PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)UserAssembly;
-			PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)(UserAssembly + dos->e_lfanew);
+			PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)((BYTE*)UserAssembly + dos->e_lfanew);
 			DWORD timestamp = nt->FileHeader.TimeDateStamp;
 
 			if (timestamp <= 0x63ECA960) {
