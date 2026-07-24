@@ -6,7 +6,7 @@ ASM      = nasm
 
 CXXFLAGS = -O2 -std=c++17 -DNDEBUG -D_CONSOLE -Wfatal-errors
 CFLAGS   = -O2
-LDFLAGS  = -shared -lntdll
+LDFLAGS  = -static-libgcc -static-libstdc++ -shared -lntdll
 
 
 dllmain.o: RSAPatch/dllmain.cpp
